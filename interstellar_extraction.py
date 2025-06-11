@@ -12,15 +12,36 @@ import tempfile
 import traceback
 
 # --- Configuration ---
-MKV_FILE = "interstellar_clip_1min_5audio.mkv"
-ORIGINAL_AUDIO_TRACK_SPECIFIERS = ['0:1', '0:2', '0:3', '0:4', '0:5'] 
+MKV_FILE = "/Volumes/Swiths 4TB SSD/Projects/Interstellar Project/Disc/UHD/Interstellar_t00.mkv"
+ORIGINAL_AUDIO_TRACK_SPECIFIERS = ['0:1', '0:4', '0:6', '0:8', '0:9'] # Eng, Fra, Deu, Ita, Spa from FULL MKV
 LANGUAGE_CODES = ['eng', 'fra', 'deu', 'ita', 'spa']
-CHAPTER_DEFINITIONS = [("TestClipFull", 0.0, 60.0)] 
+CHAPTER_DEFINITIONS = [
+    ("Chapter01", 0.000000, 575.449875),
+    ("Chapter02", 575.449875, 1032.031000),
+    ("Chapter03", 1032.031000, 1500.707542),
+    ("Chapter04", 1500.707542, 2145.351542),
+    ("Chapter05", 2145.351542, 2536.534000),
+    ("Chapter06", 2536.534000, 3019.850167),
+    ("Chapter07", 3019.850167, 3288.034750),
+    ("Chapter08", 3288.034750, 3539.369167),
+    ("Chapter09", 3539.369167, 3974.929292),
+    ("Chapter10", 3974.929292, 4648.018375),
+    ("Chapter11", 4648.018375, 5131.751625),
+    ("Chapter12", 5131.751625, 5671.957958),
+    ("Chapter13", 5671.957958, 6374.659958),
+    ("Chapter14", 6374.659958, 6934.302375),
+    ("Chapter15", 6934.302375, 7334.243583),
+    ("Chapter16", 7334.243583, 7976.802167),
+    ("Chapter17", 7976.802167, 8453.778667),
+    ("Chapter18", 8453.778667, 9311.844208),
+    ("Chapter19", 9311.844208, 9839.788292),
+    ("Chapter20", 9839.788292, 10144.224000)
+]
 CHANNEL_LAYOUT_STRING = "5.1"
 STANDARD_CHANNEL_NAMES = ['FL', 'FR', 'FC', 'LFE', 'SL', 'SR']
-OUTPUT_DIR_BASE = "interstellar_clip_5audio_EXPLICIT_MERGE_test" # New output dir
+OUTPUT_DIR_BASE = "interstellar_docking_scene_chapters"
 TARGET_SAMPLE_RATE = 48000
-ALIGNMENT_SEGMENT_DURATION_S = 58 
+ALIGNMENT_SEGMENT_DURATION_S = 300 #5 minutes for alignment segment, can be adjusted based on audio length 
 STFT_N_FFT = 2048
 STFT_HOP_LENGTH = 512
 
