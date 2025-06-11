@@ -1,0 +1,17 @@
+# Audio files
+*.wav
+*.mp3
+*.flac
+*.aiff
+*.mkv
+
+# Temp & cache
+__pycache__/
+*.log
+*.tmp
+
+# Python environment
+.env
+.venv
+env/
+venv/
