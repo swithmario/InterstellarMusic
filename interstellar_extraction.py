@@ -1,3 +1,6 @@
+# Interstellar Music Isolation - Channel-Specific Processing Script
+# Version: 0.2.1 (Reverted merge function to simpler form for testing)
+
 import subprocess
 import os
 import shutil
@@ -6,312 +9,327 @@ import librosa
 import soundfile as sf
 from scipy.signal import correlate
 import tempfile
+import traceback
 
 # --- Configuration ---
-# VVVVVV  YOU MUST EDIT THESE TWO LINES BELOW  VVVVVV
-MKV_FILE = "interstellar_clip_1min_5audio.mkv"
-AUDIO_TRACK_SPECIFIERS = ['0:1', '0:2', '0:3', '0:4', '0:5']
-# ^^^^^^  YOU MUST EDIT THESE TWO LINES ABOVE  ^^^^^^
+# IMPORTANT: REVIEW AND CONFIRM/EDIT THESE SETTINGS BEFORE RUNNING!
 
-OUTPUT_DIR = "interstellar_music_extraction"
-OUTPUT_FILENAME = "interstellar_extracted_music.wav"
+# Path to your source MKV file (can be the full movie or a test clip)
+MKV_FILE = "interstellar_clip_1min_5audio.mkv" # From your last successful clip creation
+# For running on the full movie (AFTER successful testing with the clip):
+# MKV_FILE = "/Volumes/Swiths 4TB SSD/Projects/Interstellar Project/Disc/UHD/Interstellar_t00.mkv"
 
-TARGET_SAMPLE_RATE = 48000  # Standard for Blu-ray audio
-ALIGNMENT_SEGMENT_DURATION_S = 300 # Use 5 minutes for alignment calculation (can be reduced for faster tests)
+# Original audio track specifiers FROM THE FULL MKV file that you want to use.
+# These are the streams ffmpeg will extract before splitting them into channels.
+# This should match the tracks you mapped into "interstellar_clip_1min_5audio.mkv"
+# (e.g., if those were 0:1, 0:4, 0:6, 0:8, 0:9 from the original)
+ORIGINAL_AUDIO_TRACK_SPECIFIERS = ['0:1', '0:2', '0:3', '0:4', '0:5'] # THESE ARE THE RE-MAPPED NUMBERS FOR THE CLIP
+# If running on full MKV, use original specifiers like:
+# ORIGINAL_AUDIO_TRACK_SPECIFIERS = ['0:1', '0:4', '0:6', '0:8', '0:9']
+
+
+# Corresponding short language codes for naming files. MUST match the order and number of specifiers above.
+LANGUAGE_CODES = ['eng', 'fra', 'deu', 'ita', 'spa'] # Matches 5 tracks
+
+# Channel layout of your source audio tracks (e.g., "5.1", "stereo", "7.1")
+CHANNEL_LAYOUT_STRING = "5.1"
+
+# Standard channel names for your CHANNEL_LAYOUT_STRING.
+STANDARD_CHANNEL_NAMES = ['FL', 'FR', 'FC', 'LFE', 'SL', 'SR']
+
+# Output directory for all processed files
+OUTPUT_DIR_BASE = "interstellar_channel_processed_output_reverted_merge" # Changed output dir to avoid overwrite
+
+# --- Script Parameters ---
+TARGET_SAMPLE_RATE = 48000
+ALIGNMENT_SEGMENT_DURATION_S = 300
 STFT_N_FFT = 2048
 STFT_HOP_LENGTH = 512
 
-# --- Helper Functions ---
+# --- Helper Functions --- (Identical to before, repeated for completeness)
 
-def create_output_dir():
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR)
-    return os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
+def ensure_dir_exists(dir_path):
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
+        print(f"Created directory: {dir_path}")
 
-def extract_audio_tracks(mkv_path, track_specifiers, temp_dir):
-    extracted_files = []
-    print("Extracting audio tracks...")
-    for i, specifier in enumerate(track_specifiers):
-        # Construct a unique filename for each track based on its specifier
-        safe_specifier_name = specifier.replace(':', '_').replace('/', '_') # Make specifier filename-safe
-        output_wav = os.path.join(temp_dir, f"track_{i}_{safe_specifier_name}.wav")
-        try:
-            command = [
-                'ffmpeg', '-y', '-i', mkv_path,
-                '-map', specifier,
-                '-acodec', 'pcm_s24le', # Signed 24-bit PCM for quality
-                '-ar', str(TARGET_SAMPLE_RATE),
-                output_wav
-            ]
-            print(f"Executing: {' '.join(command)}")
-            process = subprocess.run(command, check=True, capture_output=True, text=True)
-            extracted_files.append(output_wav)
-            print(f"Extracted {specifier} to {output_wav}")
-        except subprocess.CalledProcessError as e:
-            print(f"Error extracting track {specifier}: {e}")
-            print(f"FFmpeg stdout: {e.stdout}")
-            print(f"FFmpeg stderr: {e.stderr}")
-            raise # Stop if any extraction fails
-    return extracted_files
+def extract_and_split_one_language_track(mkv_path, original_track_specifier, lang_code,
+                                         temp_storage_dir, channel_names, channel_layout_str):
+    print(f"\nProcessing language: {lang_code} (Track Specifier in MKV: {original_track_specifier})")
+    language_channel_paths = {}
+    temp_multichannel_wav = os.path.join(temp_storage_dir, f"{lang_code}_temp_multichannel.wav")
 
-def load_and_standardize_audio(wav_files):
-    print("Loading and standardizing audio...")
-    audio_data_list_raw = []
-    min_channels_found = float('inf')
+    try:
+        print(f"  Extracting multi-channel track {original_track_specifier} for {lang_code}...")
+        extract_command = [
+            'ffmpeg', '-y', '-i', mkv_path,
+            '-map', original_track_specifier, # This specifier is for the mkv_path
+            '-acodec', 'pcm_s24le', '-ar', str(TARGET_SAMPLE_RATE),
+            temp_multichannel_wav
+        ]
+        print(f"    Executing FFmpeg: {' '.join(extract_command)}")
+        subprocess.run(extract_command, check=True, capture_output=True, text=True)
+        print(f"    Successfully extracted multi-channel for {lang_code} to: {temp_multichannel_wav}")
 
-    for f_idx, f_path in enumerate(wav_files):
-        try:
-            data, sr = librosa.load(f_path, sr=TARGET_SAMPLE_RATE, mono=False)
-            if sr != TARGET_SAMPLE_RATE:
-                 print(f"Warning: Track {f_idx} has sr {sr}, resampling to {TARGET_SAMPLE_RATE}")
-                 data = librosa.resample(data, orig_sr=sr, target_sr=TARGET_SAMPLE_RATE)
-
-            # Ensure data is 2D (channels, samples)
-            if data.ndim == 1:
-                data = data.reshape(1, -1) # Make mono 2D
-
-            audio_data_list_raw.append(data)
-            current_channels = data.shape[0]
-            if current_channels < min_channels_found:
-                min_channels_found = current_channels
-        except Exception as e:
-            print(f"Error loading or processing {f_path}: {e}")
-            raise
-
-    if not audio_data_list_raw:
-        print("No audio data loaded.")
-        return [], 0
-
-    # Standardize channel count to the minimum found across all tracks
-    standardized_audio_data = []
-    for data in audio_data_list_raw:
-        if data.shape[0] > min_channels_found:
-            print(f"Warning: Truncating channels from {data.shape[0]} to {min_channels_found} for one track.")
-            standardized_audio_data.append(data[:min_channels_found, :])
-        else:
-            standardized_audio_data.append(data)
-
-    # Standardize length to the shortest track
-    if not standardized_audio_data: # Should not happen if audio_data_list_raw was populated
-        return [], 0
+        print(f"  Splitting multi-channel track for {lang_code} into mono channels...")
+        channel_output_tags = "".join([f"[{name}]" for name in channel_names])
+        filter_complex_arg = f"[0:a]channelsplit=channel_layout={channel_layout_str}{channel_output_tags}"
         
-    min_length = min(track.shape[1] for track in standardized_audio_data)
-    final_audio_data = [track[:, :min_length] for track in standardized_audio_data]
-    
-    print(f"All tracks standardized to {min_channels_found} channels and {min_length} samples.")
-    return final_audio_data, min_channels_found
+        split_command_base = ['ffmpeg', '-y', '-i', temp_multichannel_wav, '-filter_complex', filter_complex_arg]
+        current_split_command = list(split_command_base)
+        for ch_name in channel_names:
+            mono_channel_output_path = os.path.join(temp_storage_dir, f"{lang_code}_{ch_name}.wav")
+            current_split_command.extend(['-map', f"[{ch_name}]", mono_channel_output_path])
+            language_channel_paths[ch_name] = mono_channel_output_path
+        
+        print(f"    Executing FFmpeg channelsplit: {' '.join(current_split_command)}")
+        subprocess.run(current_split_command, check=True, capture_output=True, text=True)
+        
+        for ch_name, path in language_channel_paths.items():
+            print(f"      Split {lang_code} channel {ch_name} to: {path}")
+        
+        if os.path.exists(temp_multichannel_wav):
+            os.remove(temp_multichannel_wav)
+            print(f"    Removed temporary multi-channel file: {temp_multichannel_wav}")
 
+    except subprocess.CalledProcessError as e:
+        print(f"  ERROR processing language {lang_code} with FFmpeg.")
+        print(f"    Command: {' '.join(e.cmd)}\n    FFmpeg stdout: {e.stdout}\n    FFmpeg stderr: {e.stderr}")
+        return {}
+    except Exception as e_gen:
+        print(f"  An unexpected error occurred processing language {lang_code}: {e_gen}")
+        traceback.print_exc()
+        return {}
+    return language_channel_paths
 
-def align_tracks_channel_wise(audio_tracks_data, reference_track_idx=0, sample_rate=48000, segment_duration_s=300):
-    print("Aligning tracks (channel-wise)...")
-    if not audio_tracks_data or len(audio_tracks_data) <= 1:
-        print("Not enough tracks to align or no tracks provided.")
-        return audio_tracks_data
+def group_mono_files_by_channel_role(all_languages_channel_data, target_channel_names):
+    print("\nGrouping mono channel files by their role...")
+    grouped_by_role = {ch_name: [] for ch_name in target_channel_names}
+    for language_data in all_languages_channel_data:
+        for ch_name, file_path in language_data.items():
+            if ch_name in grouped_by_role:
+                grouped_by_role[ch_name].append(file_path)
+    for ch_name, files in grouped_by_role.items():
+        print(f"  Channel Role '{ch_name}': Found {len(files)} language versions.")
+    return grouped_by_role
 
-    num_tracks = len(audio_tracks_data)
-    num_channels = audio_tracks_data[0].shape[0]
-    reference_track = audio_tracks_data[reference_track_idx]
-    
-    aligned_tracks = [None] * num_tracks
-    aligned_tracks[reference_track_idx] = reference_track.copy()
-
-    segment_samples = min(reference_track.shape[1], int(segment_duration_s * sample_rate))
-    if segment_samples == 0:
-        print("Warning: Alignment segment is 0 samples. Skipping alignment.")
-        # Return tracks as is, but ensure all are copies
-        return [track.copy() for track in audio_tracks_data]
-
-
-    for i in range(num_tracks):
-        if i == reference_track_idx:
-            continue
-
-        current_track_to_align = audio_tracks_data[i]
-        aligned_channels_for_current_track = []
-        print(f"  Aligning track {i+1}/{num_tracks} to reference track {reference_track_idx+1}...")
-
-        for ch_idx in range(num_channels):
-            print(f"    Aligning channel {ch_idx+1}/{num_channels}...")
-            ref_channel_segment = reference_track[ch_idx, :segment_samples]
-            
-            # For robust alignment, correlate against a slightly larger portion of the current track
-            # to allow the segment to be found even if it's shifted.
-            correlation_window_current_track = current_track_to_align[ch_idx, :] # Use full channel for now
-            
-            # Pad the signal being searched to avoid edge effects with 'valid' mode
-            # Pad by len(ref_channel_segment) - 1 on both sides
-            pad_len = len(ref_channel_segment) - 1
-            padded_corr_window = np.pad(correlation_window_current_track, (pad_len, pad_len), 'constant')
-
+def load_standardize_and_align_mono_list(mono_file_paths, sample_rate, alignment_segment_s, ref_idx=0):
+    if not mono_file_paths or len(mono_file_paths) < 2:
+        print("  Not enough mono files to process (need at least 2).")
+        if len(mono_file_paths) == 1:
             try:
-                # Correlate the reference segment against the padded current track channel
-                correlation = correlate(padded_corr_window, ref_channel_segment, mode='valid', method='fft')
-                
-                if correlation.size == 0:
-                    print(f"      Warning: Correlation array empty for track {i+1}, ch {ch_idx+1}. Using zero shift.")
-                    delay_samples = 0
-                else:
-                    # The lag is relative to the start of the 'valid' correlation output.
-                    # A peak at index `k` in `correlation` means the ref_segment starts at `k` in `correlation_window_current_track`
-                    # So, `padded_corr_window` started `pad_len` samples earlier.
-                    # The delay of `correlation_window_current_track` relative to `ref_channel_segment`.
-                    # lag_index = np.argmax(np.abs(correlation)) # More robust to phase inversions
-                    lag_index = np.argmax(correlation) 
-                    
-                    # delay_samples: how many samples to shift current_track_to_align[ch_idx]
-                    # to make it align with reference_track[ch_idx]
-                    # If peak is at lag_index, it means ref_segment best matches starting at `lag_index` of the *unpadded* current_track
-                    # So, if lag_index is positive, current track is "behind" ref, needs to be shifted left.
-                    # delay = lag_index (if current track segment starts at lag_index)
-                    # We want to shift current_track so its segment aligns with ref_segment
-                    # The `correlate` output's 0-th index corresponds to ref_segment aligning with the start of correlation_window_current_track.
-                    # Let's verify the lag calculation carefully.
-                    # `delay_arr` in previous example was `np.arange(len(correlation)) - (len(segment_being_searched) - 1)`
-                    # Here `segment_being_searched` is `ref_channel_segment`.
-                    # And `correlation_window_current_track` is the signal it's searched in (after padding).
-                    # The 'valid' mode of correlate means the output length is M-N+1, where M is len(padded_corr_window) and N is len(ref_channel_segment)
-                    # A peak at an index `k` in the correlation means the `ref_channel_segment` aligns best when its start
-                    # is placed at index `k` of `padded_corr_window`.
-                    # Since `padded_corr_window` has `pad_len` padding at the start, the actual start in `correlation_window_current_track` is `k - pad_len`.
-                    # This `k - pad_len` is the offset. If positive, `correlation_window_current_track` is delayed.
-                    # We want to shift `correlation_window_current_track` by `-(k - pad_len)`
-                    delay_samples = -(lag_index - pad_len)
-
-
-                print(f"      Track {i+1}, Ch {ch_idx+1}: Detected shift of {delay_samples} samples.")
-
-                original_channel_data = current_track_to_align[ch_idx, :]
-                shifted_channel = np.roll(original_channel_data, delay_samples)
-
-                # Zero out samples that were rolled in from the other end
-                if delay_samples > 0: # Shifted right (delayed), zero out the start
-                    shifted_channel[:delay_samples] = 0
-                elif delay_samples < 0: # Shifted left (advanced), zero out the end
-                    shifted_channel[delay_samples:] = 0
-                
-                aligned_channels_for_current_track.append(shifted_channel)
-
+                data, _ = librosa.load(mono_file_paths[0], sr=sample_rate, mono=True)
+                return [data]
             except Exception as e:
-                print(f"      Error during alignment of track {i+1}, ch {ch_idx+1}: {e}. Using original channel.")
-                aligned_channels_for_current_track.append(current_track_to_align[ch_idx, :].copy())
-        
-        aligned_tracks[i] = np.array(aligned_channels_for_current_track)
-        
-    # Final length check and truncation/padding to match reference track precisely
-    ref_len = reference_track.shape[1]
-    final_aligned_tracks = []
-    for track_idx, track_data in enumerate(aligned_tracks):
-        if track_data.shape[1] > ref_len:
-            final_aligned_tracks.append(track_data[:, :ref_len])
-        elif track_data.shape[1] < ref_len:
-            padding_needed = ref_len - track_data.shape[1]
-            padded_track = np.pad(track_data, ((0,0), (0, padding_needed)), 'constant')
-            final_aligned_tracks.append(padded_track)
-        else:
-            final_aligned_tracks.append(track_data)
+                print(f"    Error loading single mono file {mono_file_paths[0]}: {e}")
+                return None
+        return None
 
-    print("Alignment finished.")
-    return final_aligned_tracks
-
-
-def process_audio(aligned_audio_tracks, num_output_channels):
-    print("Processing audio (STFT -> Median -> ISTFT) per channel...")
-    if not aligned_audio_tracks:
-        print("No aligned audio tracks to process.")
-        return np.array([])
-
-    num_tracks_in_list = len(aligned_audio_tracks)
-    if num_tracks_in_list == 0:
-        print("Aligned audio tracks list is empty.")
-        return np.array([])
-        
-    track_length = aligned_audio_tracks[0].shape[1]
-    
-    final_processed_channels = []
-
-    for ch_idx in range(num_output_channels):
-        print(f"  Processing channel {ch_idx + 1}/{num_output_channels}...")
-        
-        stfts_for_channel = []
-        for track_idx in range(num_tracks_in_list):
-            # Ensure the track has enough channels
-            if ch_idx < aligned_audio_tracks[track_idx].shape[0]:
-                channel_data = aligned_audio_tracks[track_idx][ch_idx, :]
-                stft_result = librosa.stft(channel_data, n_fft=STFT_N_FFT, hop_length=STFT_HOP_LENGTH)
-                stfts_for_channel.append(stft_result)
-            else:
-                print(f"    Warning: Track {track_idx+1} does not have channel {ch_idx+1}. Skipping for this track.")
-        
-        if not stfts_for_channel:
-            print(f"    Error: No STFTs generated for channel {ch_idx+1}. Appending zeros.")
-            # Append a silent channel of the correct length if no STFTs could be generated
-            final_processed_channels.append(np.zeros(track_length))
-            continue
-
-        # Stack STFTs: (num_valid_tracks_for_channel, num_frequency_bins, num_time_frames)
-        stft_stack = np.array(stfts_for_channel)
-        
-        print(f"    Calculating median STFT for channel {ch_idx + 1} (from {stft_stack.shape[0]} tracks)...")
-        # Median of complex numbers: numpy.median computes it element-wise for real and imaginary parts.
-        median_stft = np.median(stft_stack, axis=0)
-        
-        print(f"    Performing ISTFT for channel {ch_idx + 1}...")
-        # Ensure 'length' matches the original track_length for ISTFT to avoid truncation/padding issues
-        processed_channel_audio = librosa.istft(median_stft, hop_length=STFT_HOP_LENGTH, length=track_length)
-        final_processed_channels.append(processed_channel_audio)
-
-    if not final_processed_channels:
-        print("No channels were processed.")
-        return np.array([])
-        
-    output_audio = np.array(final_processed_channels)
-    print("Audio processing finished.")
-    return output_audio
-
-# --- Main Execution ---
-if __name__ == "__main__":
-    if not os.path.exists(MKV_FILE):
-        print(f"Error: MKV file not found at {MKV_FILE}")
-        exit(1)
-
-    if not AUDIO_TRACK_SPECIFIERS or len(AUDIO_TRACK_SPECIFIERS) < 2: # Need at least 2 for comparison
-        print("Error: Please specify at least two AUDIO_TRACK_SPECIFIERS for comparison.")
-        exit(1)
-
-    output_file_full_path = create_output_dir()
-    # Create a temporary directory that will be automatically cleaned up
-    with tempfile.TemporaryDirectory(prefix="interstellar_audio_") as temp_dir:
-        print(f"Created temporary directory: {temp_dir}")
-        extracted_wav_files = []
+    print(f"  Loading {len(mono_file_paths)} mono files for this channel role...")
+    loaded_mono_tracks_raw = []
+    for f_path in mono_file_paths:
         try:
-            extracted_wav_files = extract_audio_tracks(MKV_FILE, AUDIO_TRACK_SPECIFIERS, temp_dir)
-            if not extracted_wav_files or len(extracted_wav_files) < len(AUDIO_TRACK_SPECIFIERS):
-                 raise Exception("Not all audio tracks were extracted successfully or fewer than specified.")
-
-            audio_data_list, num_common_channels = load_and_standardize_audio(extracted_wav_files)
-            if not audio_data_list: # Check if list is empty
-                raise Exception("Failed to load or standardize audio tracks: No data returned.")
-            if num_common_channels == 0:
-                 raise Exception("No common audio channels found after standardization, or all tracks were empty.")
-            
-            # Use the refined alignment function
-            aligned_audio = align_tracks_channel_wise(audio_data_list, sample_rate=TARGET_SAMPLE_RATE, segment_duration_s=ALIGNMENT_SEGMENT_DURATION_S)
-            if not aligned_audio: # Check if list is empty
-                raise Exception("Failed to align audio tracks: No data returned.")
-
-            final_output_audio = process_audio(aligned_audio, num_common_channels)
-            
-            if final_output_audio.size == 0:
-                raise Exception("Processing resulted in empty audio.")
-
-            print(f"Saving processed audio to {output_file_full_path}...")
-            # librosa.output.write_wav is deprecated, use soundfile
-            sf.write(output_file_full_path, final_output_audio.T, TARGET_SAMPLE_RATE) # Transpose for (samples, channels)
-            print("Done!")
-
+            data, _ = librosa.load(f_path, sr=sample_rate, mono=True)
+            loaded_mono_tracks_raw.append(data)
         except Exception as e:
-            print(f"An error occurred: {e}")
-            import traceback
-            traceback.print_exc() # Print full traceback for debugging
-        # temp_dir is automatically removed when exiting the 'with' block
-        print(f"Temporary directory {temp_dir} will be automatically cleaned up.")
+            print(f"    Error loading mono file {f_path}: {e}")
+            return None
+
+    min_len = min(len(track) for track in loaded_mono_tracks_raw)
+    standardized_mono_tracks = [track[:min_len] for track in loaded_mono_tracks_raw]
+    print(f"    Standardized all mono tracks for this role to {min_len} samples.")
+
+    print(f"  Aligning {len(standardized_mono_tracks)} mono tracks for this role...")
+    reference_mono_track = standardized_mono_tracks[ref_idx]
+    aligned_mono_tracks = [None] * len(standardized_mono_tracks)
+    aligned_mono_tracks[ref_idx] = reference_mono_track.copy()
+
+    segment_samples = min(len(reference_mono_track), int(alignment_segment_s * sample_rate))
+    if segment_samples == 0 and len(standardized_mono_tracks) > 1:
+        print("    Warning: Alignment segment is 0 samples. Using unaligned tracks for this role.")
+        return standardized_mono_tracks
+
+    for i in range(len(standardized_mono_tracks)):
+        if i == ref_idx: continue
+        current_mono_track = standardized_mono_tracks[i]
+        ref_segment = reference_mono_track[:segment_samples]
+        pad_len_corr = len(ref_segment) - 1
+        padded_current_track_corr = np.pad(current_mono_track, (pad_len_corr, pad_len_corr), 'constant')
+        try:
+            correlation = correlate(padded_current_track_corr, ref_segment, mode='valid', method='fft')
+            delay_samples = -(np.argmax(correlation) - pad_len_corr) if correlation.size > 0 else 0
+            print(f"      Track {i}: Detected shift of {delay_samples} samples.")
+            shifted_track = np.roll(current_mono_track, delay_samples)
+            if delay_samples > 0: shifted_track[:delay_samples] = 0
+            elif delay_samples < 0: shifted_track[delay_samples:] = 0
+            aligned_mono_tracks[i] = shifted_track
+        except Exception as e:
+            print(f"      Error during alignment of track {i}: {e}. Using original standardized track.")
+            aligned_mono_tracks[i] = current_mono_track.copy()
+    print(f"    Alignment finished for this channel role.")
+    return aligned_mono_tracks
+
+def process_mono_group_with_stft_median(aligned_mono_audio_list, n_fft, hop_length, original_length):
+    if not aligned_mono_audio_list: return None
+    print(f"  Performing STFT on {len(aligned_mono_audio_list)} aligned mono tracks for this role...")
+    stfts_for_role = [librosa.stft(track_data, n_fft=n_fft, hop_length=hop_length) for track_data in aligned_mono_audio_list]
+    if not stfts_for_role: return None
+    stft_stack = np.array(stfts_for_role)
+    print(f"    Calculating median STFT (from stack shape: {stft_stack.shape})...")
+    median_stft_for_role = np.median(stft_stack, axis=0)
+    print("    Performing ISTFT...")
+    processed_mono_audio = librosa.istft(median_stft_for_role, hop_length=hop_length, length=original_length)
+    print("    STFT/Median/ISTFT processing finished for this channel role.")
+    return processed_mono_audio
+
+# --- REVERTED MERGE FUNCTION ---
+def merge_processed_mono_to_multichannel(processed_mono_channel_paths_dict, output_wav_path,
+                                         ordered_channel_names_for_merge, channel_layout_str):
+    """
+    Merges processed mono WAV files into a single multi-channel WAV file using FFmpeg.
+    (Reverted to simpler join filter without explicit :map=... option for testing)
+    """
+    print(f"\nMerging processed mono channels into: {output_wav_path} (using simpler join filter)")
+    
+    merge_command = ['ffmpeg', '-y']
+    input_streams_for_join = []
+    
+    for i, ch_name in enumerate(ordered_channel_names_for_merge):
+        if ch_name not in processed_mono_channel_paths_dict:
+            print(f"  ERROR: Missing processed file for channel '{ch_name}'. Cannot merge.")
+            return False
+        mono_file_path = processed_mono_channel_paths_dict[ch_name]
+        if not os.path.exists(mono_file_path):
+            print(f"  ERROR: Processed file for channel '{ch_name}' not found at '{mono_file_path}'. Cannot merge.")
+            return False
+        merge_command.extend(['-i', mono_file_path])
+        input_streams_for_join.append(f"[{i}:a]") 
+
+    if len(input_streams_for_join) != len(ordered_channel_names_for_merge):
+        print("  ERROR: Number of input streams does not match number of expected channels. Cannot merge.")
+        return False
+
+    join_filter_inputs_str = "".join(input_streams_for_join)
+    # THIS IS THE REVERTED, SIMPLER JOIN FILTER (NO EXPLICIT :map=... part)
+    filter_complex_arg = f"{join_filter_inputs_str}join=inputs={len(ordered_channel_names_for_merge)}:channel_layout={channel_layout_str}[a]"
+    
+    merge_command.extend(['-filter_complex', filter_complex_arg, '-map', '[a]', output_wav_path])
+    
+    try:
+        print(f"  Executing FFmpeg merge: {' '.join(merge_command)}")
+        subprocess.run(merge_command, check=True, capture_output=True, text=True)
+        print(f"  Successfully merged channels to: {output_wav_path}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"  ERROR during FFmpeg merge.")
+        print(f"    Command: {' '.join(e.cmd)}\n    FFmpeg stdout: {e.stdout}\n    FFmpeg stderr: {e.stderr}")
+        return False
+    except Exception as e_gen:
+        print(f"  An unexpected error occurred during merge: {e_gen}")
+        traceback.print_exc()
+        return False
+
+# --- Main Execution Logic --- (Identical to before, repeated for completeness)
+if __name__ == "__main__":
+    print("Starting Interstellar Music Isolation - Channel-Specific Processing...")
+    print(f"Source MKV: {MKV_FILE}")
+    # IMPORTANT: If MKV_FILE is a clip, ORIGINAL_AUDIO_TRACK_SPECIFIERS must use the
+    # re-mapped stream numbers from *within that clip*.
+    # If MKV_FILE is the full movie, these are the original stream numbers from the full movie.
+    print(f"Using audio track specifiers (relative to MKV_FILE): {ORIGINAL_AUDIO_TRACK_SPECIFIERS}")
+    print(f"With language codes: {LANGUAGE_CODES}")
+    print(f"Assuming channel layout: {CHANNEL_LAYOUT_STRING} with channels: {STANDARD_CHANNEL_NAMES}")
+
+    if not os.path.exists(MKV_FILE):
+        print(f"FATAL ERROR: Source MKV file not found at '{MKV_FILE}'. Please check the path.")
+        exit(1)
+    if len(ORIGINAL_AUDIO_TRACK_SPECIFIERS) != len(LANGUAGE_CODES):
+        print("FATAL ERROR: The number of 'ORIGINAL_AUDIO_TRACK_SPECIFIERS' must match 'LANGUAGE_CODES'.")
+        exit(1)
+    if len(ORIGINAL_AUDIO_TRACK_SPECIFIERS) < 2:
+        print("FATAL ERROR: Need at least 2 language tracks for comparison.")
+        exit(1)
+
+    ensure_dir_exists(OUTPUT_DIR_BASE)
+    processed_mono_output_dir = os.path.join(OUTPUT_DIR_BASE, "processed_mono_channels")
+    ensure_dir_exists(processed_mono_output_dir)
+
+    with tempfile.TemporaryDirectory(prefix="interstellar_split_mono_") as temp_dir_for_splits:
+        print(f"Using temporary directory for split mono files: {temp_dir_for_splits}")
+        all_languages_mono_channel_data = []
+        for i, source_track_spec in enumerate(ORIGINAL_AUDIO_TRACK_SPECIFIERS):
+            lang_code = LANGUAGE_CODES[i]
+            lang_specific_channel_paths = extract_and_split_one_language_track(
+                mkv_path=MKV_FILE,
+                original_track_specifier=source_track_spec, # This is the specifier for the MKV_FILE
+                lang_code=lang_code,
+                temp_storage_dir=temp_dir_for_splits,
+                channel_names=STANDARD_CHANNEL_NAMES,
+                channel_layout_str=CHANNEL_LAYOUT_STRING
+            )
+            if lang_specific_channel_paths:
+                all_languages_mono_channel_data.append(lang_specific_channel_paths)
+            else:
+                print(f"  Skipping language {lang_code} due to errors in extraction/splitting.")
+        
+        if len(all_languages_mono_channel_data) < 2:
+            print("FATAL ERROR: Less than 2 languages successfully extracted/split. Cannot proceed.")
+            exit(1)
+
+        grouped_mono_files = group_mono_files_by_channel_role(
+            all_languages_mono_channel_data,
+            STANDARD_CHANNEL_NAMES
+        )
+        paths_of_final_processed_mono_channels = {}
+        for channel_role in STANDARD_CHANNEL_NAMES:
+            print(f"\n--- Processing Channel Role: {channel_role} ---")
+            mono_files_for_this_role = grouped_mono_files.get(channel_role, [])
+            if len(mono_files_for_this_role) < 2:
+                print(f"  Not enough versions for '{channel_role}' (found {len(mono_files_for_this_role)}). Skipping.")
+                continue
+
+            aligned_mono_tracks = load_standardize_and_align_mono_list(
+                mono_file_paths=mono_files_for_this_role,
+                sample_rate=TARGET_SAMPLE_RATE,
+                alignment_segment_s=ALIGNMENT_SEGMENT_DURATION_S
+            )
+            if not aligned_mono_tracks:
+                print(f"  Failed to load/standardize/align for '{channel_role}'. Skipping.")
+                continue
+            
+            length_for_istft = len(aligned_mono_tracks[0])
+            processed_mono_audio_for_role = process_mono_group_with_stft_median(
+                aligned_mono_audio_list=aligned_mono_tracks,
+                n_fft=STFT_N_FFT,
+                hop_length=STFT_HOP_LENGTH,
+                original_length=length_for_istft
+            )
+            if processed_mono_audio_for_role is None:
+                print(f"  Failed to process audio for '{channel_role}'. Skipping.")
+                continue
+
+            output_mono_filename = f"processed_{channel_role}.wav"
+            output_mono_filepath = os.path.join(processed_mono_output_dir, output_mono_filename)
+            try:
+                sf.write(output_mono_filepath, processed_mono_audio_for_role, TARGET_SAMPLE_RATE)
+                print(f"  Successfully saved processed '{channel_role}' channel to: {output_mono_filepath}")
+                paths_of_final_processed_mono_channels[channel_role] = output_mono_filepath
+            except Exception as e:
+                print(f"  Error saving processed '{channel_role}' channel: {e}")
+                traceback.print_exc()
+        
+        if len(paths_of_final_processed_mono_channels) == len(STANDARD_CHANNEL_NAMES):
+            print("\nAll channel roles processed. Attempting to merge into a final multi-channel file...")
+            final_merged_output_path = os.path.join(OUTPUT_DIR_BASE, f"final_merged_{CHANNEL_LAYOUT_STRING.replace('.', '_')}_output.wav")
+            merge_success = merge_processed_mono_to_multichannel(
+                processed_mono_channel_paths_dict=paths_of_final_processed_mono_channels,
+                output_wav_path=final_merged_output_path,
+                ordered_channel_names_for_merge=STANDARD_CHANNEL_NAMES,
+                channel_layout_str=CHANNEL_LAYOUT_STRING
+            )
+            if merge_success: print(f"Final merged multi-channel audio saved to: {final_merged_output_path}")
+            else: print("Failed to merge processed mono channels.")
+        else:
+            print("\nNot all channel roles successfully processed. Skipping final multi-channel merge.")
+            print(f"Processed mono channels are available in: {processed_mono_output_dir}")
+    print("\n--- Interstellar Music Isolation Script Finished ---")
